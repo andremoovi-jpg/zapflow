@@ -1,4 +1,4 @@
-import { Building2, Smartphone, Phone, Users, Key, Webhook, FileText, CreditCard, ListPlus, MessageSquare } from 'lucide-react';
+import { Building2, Smartphone, Phone, Users, Key, Webhook, FileText, CreditCard, ListPlus, MessageSquare, Send } from 'lucide-react';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import { TeamTab } from '@/components/settings/TeamTab';
 import { ApiKeysTab } from '@/components/settings/ApiKeysTab';
 import { CustomFieldsTab } from '@/components/settings/CustomFieldsTab';
 import { AutoReplyTab } from '@/components/settings/AutoReplyTab';
+import { TelegramTab } from '@/components/settings/TelegramTab';
 
 export default function Settings() {
   const { currentOrg } = useOrganization();
@@ -57,6 +58,10 @@ export default function Settings() {
             <TabsTrigger value="auto-reply" className="gap-2">
               <MessageSquare className="h-4 w-4" />
               Auto-Resposta
+            </TabsTrigger>
+            <TabsTrigger value="telegram" className="gap-2">
+              <Send className="h-4 w-4" />
+              Telegram
             </TabsTrigger>
             <TabsTrigger value="billing" className="gap-2">
               <CreditCard className="h-4 w-4" />
@@ -114,6 +119,10 @@ export default function Settings() {
 
           <TabsContent value="auto-reply">
             <AutoReplyTab />
+          </TabsContent>
+
+          <TabsContent value="telegram">
+            <TelegramTab />
           </TabsContent>
 
           <TabsContent value="billing" className="space-y-6">
