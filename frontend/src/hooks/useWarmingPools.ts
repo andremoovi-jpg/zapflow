@@ -321,6 +321,7 @@ export function useUpdateWarmingPoolMember() {
       priority?: number;
       custom_daily_limit?: number | null;
       status?: string;
+      traffic_weight?: number;
     }) => {
       const { error } = await supabase
         .from('warming_pool_members')

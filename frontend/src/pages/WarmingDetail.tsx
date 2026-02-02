@@ -92,6 +92,7 @@ import {
   useRemoveWarmingPoolMember,
   usePauseWarmingPoolMember,
   useResumeWarmingPoolMember,
+  useUpdateWarmingPoolMember,
   useWarmingEventsLog,
   useWarmingMemberMessages,
   useAddWarmingMemberMessage,
@@ -291,6 +292,7 @@ export default function WarmingDetail() {
   const removeMember = useRemoveWarmingPoolMember();
   const pauseMember = usePauseWarmingPoolMember();
   const resumeMember = useResumeWarmingPoolMember();
+  const updateMember = useUpdateWarmingPoolMember();
   const addMessage = useAddWarmingMemberMessage();
   const updateMessage = useUpdateWarmingMemberMessage();
   const removeMessage = useRemoveWarmingMemberMessage();
@@ -557,6 +559,38 @@ export default function WarmingDetail() {
               </Button>
             </div>
 
+            {/* Info card para estratégia weighted */}
+            {pool.rotation_strategy === 'weighted' && members.length > 0 && (
+              <Card className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800">
+                <CardContent className="py-4">
+                  <div className="flex items-start gap-3">
+                    <BarChart3 className="h-5 w-5 text-blue-600 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-medium text-blue-900 dark:text-blue-100">Distribuicao por Peso</p>
+                      <p className="text-sm text-blue-700 dark:text-blue-300 mt-1">
+                        {(() => {
+                          const totalWeight = members.reduce((sum, m) => sum + ((m as any).traffic_weight || 100), 0);
+                          return members.map((m, idx) => {
+                            const weight = (m as any).traffic_weight || 100;
+                            const percent = ((weight / totalWeight) * 100).toFixed(0);
+                            return (
+                              <span key={m.id}>
+                                {idx > 0 && ' | '}
+                                <strong>{m.waba_name}</strong>: {percent}%
+                              </span>
+                            );
+                          });
+                        })()}
+                      </p>
+                      <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
+                        Edite o peso de cada WABA na coluna "Peso %" para ajustar a distribuicao do trafego
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {loadingMembers ? (
               <Skeleton className="h-64" />
             ) : members.length === 0 ? (
@@ -581,6 +615,9 @@ export default function WarmingDetail() {
                       <TableHead>WABA</TableHead>
                       <TableHead>Qualidade</TableHead>
                       <TableHead>Status</TableHead>
+                      {pool.rotation_strategy === 'weighted' && (
+                        <TableHead>Peso %</TableHead>
+                      )}
                       <TableHead>Dia</TableHead>
                       <TableHead>Hoje</TableHead>
                       <TableHead>Limite</TableHead>
@@ -606,6 +643,25 @@ export default function WarmingDetail() {
                               {member.status}
                             </Badge>
                           </TableCell>
+                          {pool.rotation_strategy === 'weighted' && (
+                            <TableCell>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={100}
+                                className="w-20 h-8"
+                                value={(member as any).traffic_weight || 100}
+                                onChange={(e) => {
+                                  const value = parseInt(e.target.value) || 1;
+                                  updateMember.mutate({
+                                    id: member.id,
+                                    poolId: id!,
+                                    traffic_weight: Math.min(100, Math.max(1, value)),
+                                  });
+                                }}
+                              />
+                            </TableCell>
+                          )}
                           <TableCell>{member.warmup_phase_day || 1}</TableCell>
                           <TableCell>{member.messages_sent_today || 0}</TableCell>
                           <TableCell>{member.current_daily_limit || '-'}</TableCell>
