@@ -5288,6 +5288,12 @@ async function checkWabaHealth() {
           quality_updated_at: new Date().toISOString()
         }).eq("whatsapp_account_id", waba.id);
         
+        // AUTO-PAUSE: Pausar WABA no pool se bloqueada ou desconectada
+        if (qualityRating === "RED" || status !== "CONNECTED") {
+          console.log("[Health Check] AUTO-PAUSE: " + waba.name);
+          await supabase.from("warming_pool_members").update({ status: "paused" }).eq("whatsapp_account_id", waba.id);
+        }
+        
         if (qualityRating === "RED" || status !== "CONNECTED") {
           issues.push({
             name: waba.name,
@@ -5411,6 +5417,337 @@ app.post("/api/settings/telegram/test", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============ TELEGRAM BOT WEBHOOK ============
+
+// Endpoint para receber comandos do Telegram
+app.post("/api/telegram/webhook", async (req, res) => {
+  try {
+    const update = req.body;
+    
+    if (!update.message || !update.message.text) {
+      return res.json({ ok: true });
+    }
+    
+    const chatId = update.message.chat.id.toString();
+    const text = update.message.text.trim();
+    const textLower = text.toLowerCase();
+    const username = update.message.from?.username || update.message.from?.first_name || "Usuario";
+    
+    console.log(`[Telegram Webhook] Comando recebido: ${text} de ${username} (chat: ${chatId})`);
+    
+    const { data: org, error: orgError } = await supabase
+      .from("organizations")
+      .select("id, name, telegram_bot_token, telegram_chat_id, telegram_notifications_enabled")
+      .eq("telegram_chat_id", chatId)
+      .single();
+    
+    if (orgError || !org || !org.telegram_bot_token) {
+      console.log("[Telegram Webhook] Organizacao nao encontrada para chat_id:", chatId);
+      return res.json({ ok: true });
+    }
+    
+    if (textLower === "/status" || textLower.startsWith("/status@")) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "⏳ Gerando relatório atualizado...");
+      await sendTelegramReportForOrg(org);
+    }
+    else if (textLower.startsWith("/test")) {
+      await handleTestCommand(org, chatId, text);
+    }
+    else if (textLower === "/help" || textLower.startsWith("/help@")) {
+      const helpMsg = "📋 <b>Comandos Disponíveis</b>\n\n" +
+        "/status - Relatório atualizado das WABAs\n" +
+        "/test <numero> - Testar envio do pool\n" +
+        "   Ex: /test 5511999999999\n\n" +
+        "💡 Inclua código do país (55 Brasil)";
+      await sendTelegramMessage(org.telegram_bot_token, chatId, helpMsg);
+    }
+    
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("[Telegram Webhook] Erro:", error.message);
+    res.json({ ok: true });
+  }
+});
+
+async function handleTestCommand(org, chatId, text) {
+  try {
+    var parts = text.split(/\s+/);
+    if (parts.length < 2) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Use: /test 5511999999999");
+      return;
+    }
+    var phoneNumber = parts[1].replace(/\D/g, "");
+    if (phoneNumber.length < 10) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Numero invalido");
+      return;
+    }
+    await sendTelegramMessage(org.telegram_bot_token, chatId, "Testando pool para " + phoneNumber + "...");
+    
+    var poolsRes = await supabase.from("warming_pools").select("id, name").eq("organization_id", org.id).eq("status", "active").limit(1);
+    if (!poolsRes.data || poolsRes.data.length === 0) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Nenhum pool ativo");
+      return;
+    }
+    var pool = poolsRes.data[0];
+    
+    var wabaIdRes = await supabase.rpc("select_warming_waba", { pool_id: pool.id });
+    if (!wabaIdRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Nenhuma WABA disponivel");
+      return;
+    }
+    
+    var wabaRes = await supabase.from("whatsapp_accounts").select("id, name, access_token_encrypted").eq("id", wabaIdRes.data).single();
+    if (!wabaRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Erro WABA");
+      return;
+    }
+    var waba = wabaRes.data;
+    
+    var phoneRes = await supabase.from("phone_numbers").select("phone_number_id").eq("whatsapp_account_id", waba.id).eq("is_default", true).single();
+    if (!phoneRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Numero nao configurado");
+      return;
+    }
+    var phoneNumberId = phoneRes.data.phone_number_id;
+    
+    // Limpar contatos antigos
+    var oldContacts = await supabase.from("contacts").select("id").eq("whatsapp_account_id", waba.id).eq("phone_number", phoneNumber);
+    if (oldContacts.data) {
+      for (var i = 0; i < oldContacts.data.length; i++) {
+        var cid = oldContacts.data[i].id;
+        var hist = await supabase.from("warming_contact_history").select("id").eq("contact_id", cid);
+        if (hist.data) {
+          for (var j = 0; j < hist.data.length; j++) {
+            await supabase.from("warming_message_executions").delete().eq("warming_contact_history_id", hist.data[j].id);
+          }
+          await supabase.from("warming_contact_history").delete().eq("contact_id", cid);
+        }
+        await supabase.from("messages").delete().eq("contact_id", cid);
+        await supabase.from("contacts").delete().eq("id", cid);
+      }
+    }
+    
+    var memberRes = await supabase.from("warming_pool_members").select("id").eq("warming_pool_id", pool.id).eq("whatsapp_account_id", waba.id).single();
+    if (!memberRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "WABA nao esta no pool");
+      return;
+    }
+    var poolMember = memberRes.data;
+    
+    var msgsRes = await supabase.from("warming_member_messages").select("id, template_name, template_language, template_variables, sequence_order").eq("warming_pool_member_id", poolMember.id).eq("is_active", true).order("sequence_order", { ascending: true });
+    if (!msgsRes.data || msgsRes.data.length === 0) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Nenhuma msg configurada");
+      return;
+    }
+    var allMessages = msgsRes.data;
+    var messageConfig = allMessages[0];
+    
+    // Criar contato
+    var newContactRes = await supabase.from("contacts").insert({ phone_number: phoneNumber, wa_id: phoneNumber, name: "Teste Pool", whatsapp_account_id: waba.id, organization_id: org.id }).select().single();
+    if (newContactRes.error || !newContactRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Erro criar contato: " + (newContactRes.error ? newContactRes.error.message : "?"));
+      return;
+    }
+    var newContact = newContactRes.data;
+    
+    // Criar history
+    var histRes = await supabase.from("warming_contact_history").insert({ contact_id: newContact.id, warming_pool_id: pool.id, whatsapp_account_id: waba.id, status: "active", messages_sent: 0, has_replied: false }).select().single();
+    if (histRes.error || !histRes.data) {
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Erro criar historico");
+      return;
+    }
+    var contactHistory = histRes.data;
+    
+    // Criar execucoes
+    var now = new Date();
+    for (var k = 0; k < allMessages.length; k++) {
+      var msg = allMessages[k];
+      await supabase.from("warming_message_executions").insert({ warming_contact_history_id: contactHistory.id, warming_member_message_id: msg.id, status: k === 0 ? "pending" : "scheduled", scheduled_for: now.toISOString() });
+    }
+    
+    // Montar payload
+    var components = [];
+    var variables = messageConfig.template_variables || {};
+    if (variables.body && Array.isArray(variables.body)) {
+      var params = [];
+      for (var m = 0; m < variables.body.length; m++) {
+        var txt = String(variables.body[m]).replace(/\{\{nome\}\}/gi, "Teste").replace(/\{\{produto\}\}/gi, "Produto").replace(/\{\{data\}\}/gi, new Date().toLocaleDateString("pt-BR")).replace(/\{\{[^}]+\}\}/g, "test");
+        params.push({ type: "text", text: txt });
+      }
+      components.push({ type: "body", parameters: params });
+    }
+    
+    var payload = { messaging_product: "whatsapp", to: phoneNumber, type: "template", template: { name: messageConfig.template_name, language: { code: messageConfig.template_language || "pt_BR" } } };
+    if (components.length > 0) payload.template.components = components;
+    
+    // Enviar
+    try {
+      var waRes = await axios.post("https://graph.facebook.com/v21.0/" + phoneNumberId + "/messages", payload, { headers: { "Authorization": "Bearer " + waba.access_token_encrypted, "Content-Type": "application/json" } });
+      var msgId = waRes.data && waRes.data.messages && waRes.data.messages[0] ? waRes.data.messages[0].id : "N/A";
+      await supabase.from("warming_message_executions").update({ status: "sent", sent_at: new Date().toISOString(), whatsapp_message_id: msgId }).eq("warming_contact_history_id", contactHistory.id).eq("warming_member_message_id", messageConfig.id);
+      await supabase.from("warming_contact_history").update({ messages_sent: 1 }).eq("id", contactHistory.id);
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Pool testado!\n\nNumero: " + phoneNumber + "\nWABA: " + waba.name + "\nTemplate: " + messageConfig.template_name + "\nMsgs: " + allMessages.length + "\nID: " + msgId + "\n\nClique nos botoes para testar!");
+    } catch (waError) {
+      var errMsg = waError.response && waError.response.data && waError.response.data.error ? waError.response.data.error.message : waError.message;
+      await sendTelegramMessage(org.telegram_bot_token, chatId, "Erro: " + errMsg);
+    }
+  } catch (error) {
+    console.error("[Test] Erro:", error.message);
+    await sendTelegramMessage(org.telegram_bot_token, chatId, "Erro: " + error.message);
+  }
+}
+app.post("/api/telegram/setup-webhook", async (req, res) => {
+  try {
+    const { organization_id } = req.body;
+    
+    if (!organization_id) {
+      return res.status(400).json({ error: "organization_id é obrigatório" });
+    }
+    
+    const { data: org, error } = await supabase
+      .from("organizations")
+      .select("telegram_bot_token")
+      .eq("id", organization_id)
+      .single();
+    
+    if (error || !org?.telegram_bot_token) {
+      return res.status(400).json({ error: "Bot token não configurado" });
+    }
+    
+    const response = await axios.post(
+      `https://api.telegram.org/bot${org.telegram_bot_token}/setWebhook`,
+      { url: "https://api.publipropaganda.shop/api/telegram/webhook" }
+    );
+    
+    if (response.data?.ok) {
+      res.json({ success: true, message: "Webhook configurado!" });
+    } else {
+      res.status(400).json({ error: response.data?.description || "Erro" });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function sendTelegramReportForOrg(org) {
+  try {
+    const { data: wabas } = await supabase
+      .from("whatsapp_accounts")
+      .select("id, name, waba_id, access_token_encrypted, status")
+      .eq("organization_id", org.id);
+    
+    if (!wabas || wabas.length === 0) {
+      await sendTelegramMessage(org.telegram_bot_token, org.telegram_chat_id, "❌ Nenhuma WABA cadastrada.");
+      return;
+    }
+    
+    let totalMessages = 0;
+    let activeCount = 0;
+    let inactiveCount = 0;
+    const wabaDetails = [];
+    
+    for (const waba of wabas) {
+      const { data: phone } = await supabase
+        .from("phone_numbers")
+        .select("phone_number_id, phone_number, display_name, messages_sent_today")
+        .eq("whatsapp_account_id", waba.id)
+        .eq("is_default", true)
+        .single();
+      
+      let status = "Inativo";
+      let statusEmoji = "🔴";
+      let canSend = false;
+      
+      if (phone && waba.access_token_encrypted) {
+        try {
+          const response = await axios.get(
+            `https://graph.facebook.com/v21.0/${waba.waba_id}?fields=health_status`,
+            { headers: { Authorization: `Bearer ${waba.access_token_encrypted}` } }
+          );
+          
+          const healthData = response.data?.health_status;
+          const healthStatus = healthData?.can_send_message;
+          const wabaEntity = healthData?.entities?.find(e => e.entity_type === "WABA");
+          const wabaCanSend = wabaEntity?.can_send_message === "AVAILABLE";
+          
+          if (healthStatus === "AVAILABLE" || (healthStatus === "LIMITED" && wabaCanSend)) {
+            status = "Ativo";
+            statusEmoji = "🟢";
+            canSend = true;
+            activeCount++;
+          } else if (healthStatus === "LIMITED") {
+            status = "Limitado";
+            statusEmoji = "🟡";
+            activeCount++;
+          } else {
+            status = "Bloqueado";
+            statusEmoji = "🔴";
+            inactiveCount++;
+          }
+        } catch (err) {
+          status = "Erro API";
+          statusEmoji = "🔴";
+          inactiveCount++;
+        }
+      } else {
+        inactiveCount++;
+      }
+      
+      // Contar templates enviados HOJE usando RPC
+      let msgToday = 0;
+      try {
+        const { data: countResult } = await supabase.rpc("count_waba_templates_today", {
+          waba_uuid: waba.id
+        });
+        msgToday = countResult || 0;
+      } catch (err) {
+        console.log("[Telegram Report] Erro ao contar templates:", err.message);
+      }
+      totalMessages += msgToday;
+      
+      wabaDetails.push({
+        name: waba.name,
+        phone: phone?.phone_number || "N/A",
+        status,
+        statusEmoji,
+        messages: msgToday,
+        canSend
+      });
+    }
+    
+    const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    let message = "📊 <b>RELATÓRIO DE WABAs</b>\n";
+    message += "━━━━━━━━━━━━━━━━━━━━━\n";
+    message += `🕐 ${now}\n`;
+    message += `🏢 <b>${org.name}</b>\n\n`;
+    
+    message += "📈 <b>RESUMO</b>\n";
+    message += `   • Total WABAs: ${wabas.length}\n`;
+    message += `   • Ativas: ${activeCount} 🟢\n`;
+    message += `   • Inativas: ${inactiveCount} 🔴\n`;
+    message += `   • Msgs hoje: ${totalMessages}\n\n`;
+    
+    message += "📱 <b>DETALHES</b>\n";
+    message += "━━━━━━━━━━━━━━━━━━━━━\n";
+    
+    for (const w of wabaDetails) {
+      message += `\n${w.statusEmoji} <b>${w.name}</b>\n`;
+      message += `   📞 ${w.phone}\n`;
+      message += `   📊 Status: ${w.status}\n`;
+      message += `   📨 Enviadas hoje: ${w.messages}\n`;
+    }
+    
+    message += "\n━━━━━━━━━━━━━━━━━━━━━\n";
+    message += "💡 Use /status para atualizar";
+    
+    await sendTelegramMessage(org.telegram_bot_token, org.telegram_chat_id, message);
+  } catch (error) {
+    console.error("[Telegram Report] Erro ao gerar relatorio:", error.message);
+    await sendTelegramMessage(org.telegram_bot_token, org.telegram_chat_id, "❌ Erro ao gerar relatório: " + error.message);
+  }
+}
+
 
 // Endpoint para forçar health check manual
 app.post("/api/waba/health-check", async (req, res) => {

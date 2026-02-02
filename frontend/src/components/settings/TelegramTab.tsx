@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Send, Bell, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Send, Bell, Loader2, CheckCircle2, AlertCircle, Webhook } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,6 +18,7 @@ export function TelegramTab() {
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [settingUpWebhook, setSettingUpWebhook] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(true);
 
   // Carregar configurações atuais
@@ -108,6 +109,36 @@ export function TelegramTab() {
     }
   };
 
+  const handleSetupWebhook = async () => {
+    if (!currentOrg?.id || !botToken) {
+      toast.error('Configure o Bot Token primeiro');
+      return;
+    }
+
+    setSettingUpWebhook(true);
+    try {
+      const response = await fetch(`${API_URL}/api/telegram/setup-webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          organization_id: currentOrg.id
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        toast.success('Comando /status ativado! Teste no Telegram.');
+      } else {
+        toast.error(data.error || 'Erro ao configurar webhook');
+      }
+    } catch (error) {
+      toast.error('Erro ao configurar webhook');
+    } finally {
+      setSettingUpWebhook(false);
+    }
+  };
+
   if (loadingSettings) {
     return (
       <Card>
@@ -178,7 +209,7 @@ export function TelegramTab() {
             </div>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             <Button onClick={handleSave} disabled={loading}>
               {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Salvar Configurações
@@ -191,6 +222,33 @@ export function TelegramTab() {
               {testing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Testar Conexão
             </Button>
+            <Button
+              variant="secondary"
+              onClick={handleSetupWebhook}
+              disabled={settingUpWebhook || !botToken}
+            >
+              {settingUpWebhook && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              <Webhook className="h-4 w-4 mr-2" />
+              Ativar /status
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Webhook className="h-5 w-5" />
+            Comando /status
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            Após salvar as configurações e clicar em "Ativar /status", você pode enviar o comando <code className="bg-muted px-1 py-0.5 rounded">/status</code> no Telegram para receber um relatório atualizado das suas WABAs a qualquer momento.
+          </p>
+          <div className="p-3 rounded-lg bg-muted/50 text-sm">
+            <p className="font-medium mb-1">Exemplo de uso:</p>
+            <p className="text-muted-foreground">No chat do bot ou grupo, envie: <code className="bg-background px-1 py-0.5 rounded">/status</code></p>
           </div>
         </CardContent>
       </Card>
