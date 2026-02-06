@@ -4281,7 +4281,31 @@ async function continueFlowExecution(contactId, buttonId, wabaPhoneNumberId = nu
     }
   });
 
+  // PATCH /api/warming/pool-member/:wabaId - Atualizar membro do pool manualmente
+  app.patch('/api/warming/pool-member/:wabaId', async (req, res) => {
+    try {
+      const { wabaId } = req.params;
+      const { current_quality, status } = req.body;
 
+      const updateData = {};
+      if (current_quality) updateData.current_quality = current_quality;
+      if (status) updateData.status = status;
+
+      const { data, error } = await supabase
+        .from('warming_pool_members')
+        .update(updateData)
+        .eq('whatsapp_account_id', wabaId)
+        .select();
+
+      if (error) throw error;
+
+      console.log('[Warming API] Pool member atualizado:', wabaId, updateData);
+      res.json({ success: true, updated: data });
+    } catch (error) {
+      console.error('[Warming API] Erro ao atualizar pool member:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
 
   // POST /api/warming/process-messages - Processa mensagens agendadas (cron)
   app.post("/api/warming/process-messages", async (req, res) => {
@@ -5283,18 +5307,21 @@ async function checkWabaHealth() {
           status: status === "CONNECTED" ? "active" : "inactive"
         }).eq("phone_number_id", phoneNumbers.phone_number_id);
         
+        // NOTA: Meta não retorna qualidade corretamente desde out/2025, usar UNKNOWN
+        const safeQuality = (qualityRating === "RED" || qualityRating === "UNKNOWN") ? "UNKNOWN" : qualityRating;
+
         await supabase.from("warming_pool_members").update({
-          current_quality: qualityRating,
+          current_quality: safeQuality,
           quality_updated_at: new Date().toISOString()
         }).eq("whatsapp_account_id", waba.id);
-        
-        // AUTO-PAUSE: Pausar WABA no pool se bloqueada ou desconectada
-        if (qualityRating === "RED" || status !== "CONNECTED") {
-          console.log("[Health Check] AUTO-PAUSE: " + waba.name);
+
+        // AUTO-PAUSE: Pausar WABA no pool APENAS se desconectada (não baseado em qualidade)
+        if (status !== "CONNECTED") {
+          console.log("[Health Check] AUTO-PAUSE (desconectada): " + waba.name);
           await supabase.from("warming_pool_members").update({ status: "paused" }).eq("whatsapp_account_id", waba.id);
         }
-        
-        if (qualityRating === "RED" || status !== "CONNECTED") {
+
+        if (status !== "CONNECTED") {
           issues.push({
             name: waba.name,
             phone: phoneNumbers.phone_number,
@@ -5305,7 +5332,7 @@ async function checkWabaHealth() {
           });
         }
         
-        console.log(`[Health Check] ${waba.name}: quality=${qualityRating}, status=${status}, limit=${messagingLimit}`);
+        console.log(`[Health Check] ${waba.name}: quality=${safeQuality}, status=${status}, limit=${messagingLimit}`);
         
       } catch (wabaError) {
         console.error(`[Health Check] Erro ao verificar ${waba.name}:`, wabaError.response?.data?.error?.message || wabaError.message);
